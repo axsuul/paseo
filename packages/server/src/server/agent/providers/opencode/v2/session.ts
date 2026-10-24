@@ -391,11 +391,13 @@ export class OpenCodeV2Session implements AgentSession {
     });
   }
   async startTurn(prompt: AgentPromptInput, options?: AgentRunOptions) {
+    if (options?.command) throw new Error("Structured command delivery requires OpenCode 1.x");
     await this.reconnectIfExited();
     await this.connection.bindSession(this.id, this.config.cwd);
     return this.turns.startTurn(prompt, options);
   }
   steerActiveTurn(prompt: AgentPromptInput, options: SteerActiveTurnOptions): Promise<SteerResult> {
+    if (options.command) throw new Error("Structured command delivery requires OpenCode 1.x");
     return this.turns.steerActiveTurn(prompt, options);
   }
   interrupt() {

@@ -1419,12 +1419,25 @@ export const FetchAgentRequestMessageSchema = z.object({
   agentId: z.string(),
 });
 
+export const AgentCommandSchema = z.object({
+  name: z.literal("auto"),
+  arguments: z.string(),
+  context: z.object({
+    executionId: z.string().min(1),
+    instructions: z.string(),
+    history: z.string(),
+  }),
+});
+
+export type AgentCommand = z.infer<typeof AgentCommandSchema>;
+
 export const SendAgentMessageRequestSchema = z.object({
   type: z.literal("send_agent_message_request"),
   requestId: z.string(),
   /** Accepts full ID, unique prefix, or exact full title (server resolves). */
   agentId: z.string(),
   text: z.string(),
+  command: AgentCommandSchema.optional(),
   /** Opaque sender identity for agent-originated prompts. */
   sourceAgentId: z.string().min(1).optional(),
   sourceAgentServerId: z.string().min(1).optional(),
@@ -3855,6 +3868,7 @@ export const ServerInfoStatusPayloadSchema = z
         canonicalSubmittedPrompts: z.boolean().optional(),
         agentMessageProvenance: z.boolean().optional(),
         agentMessageBatching: z.boolean().optional(),
+        agentCommandDelivery: z.boolean().optional(),
         // COMPAT(agentTurnIdentity): accept peers that observed pre-release v0.2.6 through 2027-01-31.
         agentTurnIdentity: z.boolean().optional(),
         // COMPAT(stableProjectIdentity): added in v0.1.109, remove gate after 2027-01-15.

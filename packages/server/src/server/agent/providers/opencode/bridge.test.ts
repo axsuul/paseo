@@ -823,9 +823,9 @@ describe("OpenCodeBridge", () => {
       };
 
       expect(config.model).toBe("provider/model");
-      expect(config.plugin[0]).toBe("user-plugin");
+      expect(config.plugin[1]).toBe("user-plugin");
       expect(config.plugin).toHaveLength(2);
-      expect(config.plugin[1]?.[0]).toMatch(/paseo-[a-f0-9]{64}\.mjs$/);
+      expect(config.plugin[0]?.[0]).toMatch(/paseo-[a-f0-9]{64}\.mjs$/);
     } finally {
       await bridge.close();
     }

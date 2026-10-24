@@ -8321,6 +8321,16 @@ export class Session {
     try {
       const agentId = resolved.agentId;
 
+      if (msg.command && (msg.sourceAgentId || msg.images?.length || msg.attachments?.length)) {
+        throw new Error("Command delivery cannot include an agent source or attachments");
+      }
+      const commandProvider = msg.command
+        ? (this.agentManager.getAgent(agentId)?.provider ??
+          (await this.agentStorage.get(agentId))?.provider)
+        : undefined;
+      if (msg.command && commandProvider !== "opencode") {
+        throw new Error("Structured command delivery requires OpenCode");
+      }
       const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
       this.sessionLogger.trace(
         {
@@ -8368,6 +8378,7 @@ export class Session {
           activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
           sessionMode: msg.sessionMode,
           clearPendingPermissions: true,
+          runOptions: msg.command ? { command: msg.command } : undefined,
           logger: this.sessionLogger,
         });
         if (result.disposition === "turn_started") {
@@ -8384,6 +8395,7 @@ export class Session {
             messageId: msg.messageId,
             request: {
               prompt,
+              command: msg.command,
               sourceAgentId: msg.sourceAgentId,
               sourceAgentServerId: msg.sourceAgentServerId,
               sessionMode: msg.sessionMode,

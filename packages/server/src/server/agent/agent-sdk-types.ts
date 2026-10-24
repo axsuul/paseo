@@ -197,6 +197,7 @@ export type AgentPromptContentBlock =
 export type AgentPromptInput = string | AgentPromptContentBlock[];
 
 export interface AgentRunOptions {
+  command?: import("@getpaseo/protocol/messages").AgentCommand;
   outputSchema?: unknown;
   resumeFrom?: AgentPersistenceHandle;
   maxThinkingTokens?: number;
@@ -685,6 +686,7 @@ export interface AgentSession {
   readonly initialTimeline?: ImportedTimelineEntry[];
   run(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<AgentRunResult>;
   startTurn(prompt: AgentPromptInput, options?: AgentRunOptions): Promise<{ turnId: string }>;
+  cancelPendingCommand?(): void;
   steerActiveTurn?(prompt: AgentPromptInput, options: SteerActiveTurnOptions): Promise<SteerResult>;
   subscribe(callback: (event: AgentStreamEvent) => void): () => void;
   streamHistory(): AsyncGenerator<AgentStreamEvent>;

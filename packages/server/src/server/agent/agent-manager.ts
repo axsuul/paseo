@@ -3350,6 +3350,7 @@ export class AgentManager {
 
   private async cancelAgentRunNow(agentId: string): Promise<AgentRunCancellationResult> {
     const agent = this.requireSessionAgent(agentId);
+    agent.session.cancelPendingCommand?.();
     const run =
       this.runs.getRun(agentId) ??
       (agent.lifecycle === "running" ? this.runs.trackAutonomousRun(agentId, null) : null);

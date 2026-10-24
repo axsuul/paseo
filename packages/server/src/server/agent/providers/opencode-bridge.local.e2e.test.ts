@@ -1,5 +1,7 @@
 import { OpenCodeRuntimeClient } from "./opencode/runtime-client.js";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 
@@ -22,6 +24,7 @@ import { OpenCodeAgentClient } from "./opencode-agent.js";
 import { OpenCodeV2AgentClient } from "./opencode/v2/agent.js";
 import { OpenCodeBridge } from "./opencode/bridge.js";
 import { OpenCodeServerManager } from "./opencode/server-manager.js";
+import { createDaemonTestContext, type DaemonTestContext } from "../../test-utils/index.js";
 import {
   drainPersistedTimeline,
   readAssistantText,
@@ -30,6 +33,70 @@ import {
 
 test("real OpenCode server advertises agent-scoped notification descriptions", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "paseo-opencode-manifest-real-"));
+  const observed = path.join(root, "observed.json");
+  const plugin = path.join(root, "observer.js");
+  let modelRequests = 0;
+  let releaseModel: (() => void) | undefined;
+  let toolAttempt = false;
+  const modelServer = createServer((request, response) => {
+    modelRequests++;
+    request.resume();
+    if (toolAttempt) {
+      releaseModel = () => {
+        response.writeHead(200, { "Content-Type": "text/event-stream" });
+        const delta = {
+          role: "assistant",
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_canceled",
+              type: "function",
+              function: {
+                name: "bash",
+                arguments: JSON.stringify({
+                  command: `touch ${path.join(root, "must-not-exist")}`,
+                  description: "Cancellation probe",
+                }),
+              },
+            },
+          ],
+        };
+        response.write(
+          `data: ${JSON.stringify({ id: "test", object: "chat.completion.chunk", created: 1, model: "test", choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`,
+        );
+        response.write(
+          `data: ${JSON.stringify({ id: "test", object: "chat.completion.chunk", created: 1, model: "test", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\n`,
+        );
+        response.end("data: [DONE]\n\n");
+      };
+      return;
+    }
+    response.writeHead(500, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "The canceled command reached the model" } }));
+  });
+  await new Promise<void>((resolve) => modelServer.listen(0, "127.0.0.1", resolve));
+  const modelAddress = modelServer.address();
+  if (!modelAddress || typeof modelAddress === "string")
+    throw new Error("Model server has no address");
+  await writeFile(
+    plugin,
+    `import { writeFile, readFile } from "node:fs/promises";
+export default async () => {
+  let command;
+  return {
+    "command.execute.before": async (input) => { command = input; },
+    "chat.message": async (input, output) => {
+      await writeFile(${JSON.stringify(observed)}, JSON.stringify({command, input, output}));
+      if (command.arguments === "pause after claim") {
+        while (await readFile(${JSON.stringify(path.join(root, "release"))}, "utf8").catch(() => "") !== "yes") await new Promise(resolve => setTimeout(resolve, 10));
+        return;
+      }
+      if (command.arguments === "pause model") return;
+      throw new Error("PASEO_COMMAND_OBSERVED");
+    },
+  };
+};`,
+  );
   const logger = createTestLogger();
   const providerSnapshotManager = new ProviderSnapshotManager({ logger });
   const dependencies = {
@@ -49,11 +116,24 @@ test("real OpenCode server advertises agent-scoped notification descriptions", a
         XDG_DATA_HOME: path.join(root, "data"),
         XDG_CACHE_HOME: path.join(root, "cache"),
         OPENCODE_DISABLE_AUTO_UPDATE: "1",
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({
+          plugin: [pathToFileURL(plugin).href],
+          command: { auto: { template: "$ARGUMENTS" } },
+          provider: {
+            local: {
+              npm: "@ai-sdk/openai-compatible",
+              name: "Local",
+              options: { baseURL: `http://127.0.0.1:${modelAddress.port}/v1`, apiKey: "test" },
+              models: { test: { name: "test", limit: { context: 10000, output: 1000 } } },
+            },
+          },
+        }),
       },
     },
     decorateServerEnv: (env) => bridge.decorateServerEnv(env),
   });
   let inspection: Awaited<ReturnType<OpenCodeServerManager["acquireCurrent"]>> | undefined;
+  let daemon: DaemonTestContext | undefined;
   try {
     await bridge.start();
     inspection = await manager.acquireCurrent();
@@ -74,11 +154,187 @@ test("real OpenCode server advertises agent-scoped notification descriptions", a
         },
       });
     }
+    daemon = await createDaemonTestContext({
+      agentClients: {
+        opencode: new OpenCodeAgentClient(logger, undefined, { serverManager: manager, bridge }),
+      },
+    });
+    const agent = await daemon.client.createAgent({
+      provider: "opencode",
+      cwd: root,
+      model: "local/test",
+    });
+    const arrival = {
+      executionId: "execution-one",
+      instructions: "Trusted Hub instructions",
+      history: "Untrusted Discord history",
+    };
+    await daemon.client.sendMessage(agent.id, "only the request", {
+      command: { name: "auto", arguments: "only the request", context: arrival },
+    });
+    await expect
+      .poll(async () => readFile(observed, "utf8").catch(() => ""), { timeout: 30_000 })
+      .not.toBe("");
+    await daemon.client.waitForFinish(agent.id, 30_000);
+    const result = JSON.parse(await readFile(observed, "utf8"));
+    expect(result.command).toMatchObject({ command: "auto", arguments: "only the request" });
+    expect(result.output.parts[0].metadata.paseoArrival).toMatchObject(arrival);
+    const continuationMessageID =
+      result.output.parts[0].metadata.paseoArrival.continuationMessageID;
+    expect(continuationMessageID).toMatch(/^msg_paseo_route_/);
+    const sessionID = result.output.message.sessionID;
+    const foreign = await sdk.session.create({ directory: root });
+    const foreignRoute = await sdk.session.command({
+      sessionID: foreign.data!.id,
+      directory: root,
+      messageID: continuationMessageID,
+      command: "auto",
+      arguments: "must not run",
+      model: "local/test",
+    });
+    expect(foreignRoute.error).toBeDefined();
+    expect(JSON.parse(await readFile(observed, "utf8")).output.message.id).toBe(
+      result.output.message.id,
+    );
+    const validRoute = await sdk.session.command({
+      sessionID,
+      directory: root,
+      messageID: continuationMessageID,
+      command: "auto",
+      arguments: "routed request",
+      model: "local/test",
+    });
+    expect(validRoute.error).toBeDefined();
+    const routed = JSON.parse(await readFile(observed, "utf8"));
+    expect(routed.output.message.id).toBe(continuationMessageID);
+    expect(routed.output.parts[0].metadata.paseoArrival).toEqual(arrival);
+    const replay = await sdk.session.command({
+      sessionID,
+      directory: root,
+      messageID: continuationMessageID,
+      command: "auto",
+      arguments: "replay",
+      model: "local/test",
+    });
+    expect(replay.error).toBeDefined();
+    expect(JSON.parse(await readFile(observed, "utf8")).command.arguments).toBe("routed request");
+    await daemon.client.sendMessage(agent.id, "second request", {
+      command: {
+        name: "auto",
+        arguments: "second request",
+        context: { ...arrival, executionId: "execution-two" },
+      },
+    });
+    await daemon.client.waitForFinish(agent.id, 30_000);
+    const second = JSON.parse(await readFile(observed, "utf8"));
+    const canceledMessageID = second.output.parts[0].metadata.paseoArrival.continuationMessageID;
+    await daemon.client.cancelAgent(agent.id);
+    const canceledRoute = await sdk.session.command({
+      sessionID,
+      directory: root,
+      messageID: canceledMessageID,
+      command: "auto",
+      arguments: "must not run",
+      model: "local/test",
+    });
+    expect(canceledRoute.error).toBeDefined();
+    expect(JSON.parse(await readFile(observed, "utf8")).output.message.id).toBe(
+      second.output.message.id,
+    );
+    await daemon.client.sendMessage(agent.id, "third request", {
+      command: { name: "auto", arguments: "third request", context: arrival },
+    });
+    await daemon.client.waitForFinish(agent.id, 30_000);
+    const third = JSON.parse(await readFile(observed, "utf8"));
+    const claimedMessageID = third.output.parts[0].metadata.paseoArrival.continuationMessageID;
+    const afterClaim = sdk.session.command({
+      sessionID,
+      directory: root,
+      messageID: claimedMessageID,
+      command: "auto",
+      arguments: "pause after claim",
+      model: "local/test",
+    });
+    await expect
+      .poll(async () => JSON.parse(await readFile(observed, "utf8")).output.message.id)
+      .toBe(claimedMessageID);
+    await daemon.client.cancelAgent(agent.id);
+    await writeFile(path.join(root, "release"), "yes");
+    const stopped = await afterClaim;
+    expect(stopped.error ?? stopped.data?.info.error).toBeDefined();
+    expect(JSON.stringify(stopped)).toContain("Command arrival is no longer active");
+    expect(modelRequests).toBe(0);
+    await daemon.client.sendMessage(agent.id, "tool request", {
+      command: { name: "auto", arguments: "tool request", context: arrival },
+    });
+    await daemon.client.waitForFinish(agent.id, 30_000);
+    const toolInitial = JSON.parse(await readFile(observed, "utf8"));
+    toolAttempt = true;
+    const toolCommand = sdk.session.command({
+      sessionID,
+      directory: root,
+      messageID: toolInitial.output.parts[0].metadata.paseoArrival.continuationMessageID,
+      command: "auto",
+      arguments: "pause model",
+      model: "local/test",
+    });
+    await expect.poll(() => typeof releaseModel).toBe("function");
+    await daemon.client.cancelAgent(agent.id);
+    releaseModel!();
+    const toolStopped = await toolCommand;
+    expect(toolStopped.data?.info.error?.name).toBe("MessageAbortedError");
+    expect(
+      await readFile(path.join(root, "must-not-exist"), "utf8").then(
+        () => true,
+        () => false,
+      ),
+    ).toBe(false);
+    toolAttempt = false;
+    await daemon.client.sendMessage(agent.id, "/auto manual request");
+    await daemon.client.waitForFinish(agent.id, 30_000);
+    const manual = JSON.parse(await readFile(observed, "utf8"));
+    expect(manual.output.parts[0].metadata?.paseoArrival).toBeUndefined();
+    await daemon.client.sendMessage(agent.id, "restart request", {
+      command: { name: "auto", arguments: "restart request", context: arrival },
+    });
+    await daemon.client.waitForFinish(agent.id, 30_000);
+    const beforeRestart = JSON.parse(await readFile(observed, "utf8"));
+    const staleMessageID =
+      beforeRestart.output.parts[0].metadata.paseoArrival.continuationMessageID;
+    await bridge.close();
+    await bridge.start();
+    await manager.shutdown();
+    inspection = await manager.acquireCurrent();
+    const restarted = createOpencodeClient({ baseUrl: inspection.server.url, directory: root });
+    bridge.bindSession({ sessionId: sessionID, env: {} });
+    const staleRoute = await restarted.session.command({
+      sessionID,
+      directory: root,
+      messageID: staleMessageID,
+      command: "auto",
+      arguments: "must not run after restart",
+      model: "local/test",
+    });
+    expect(staleRoute.error).toBeDefined();
+    expect(JSON.parse(await readFile(observed, "utf8")).output.message.id).toBe(
+      beforeRestart.output.message.id,
+    );
+    expect(modelRequests).toBe(1);
   } finally {
+    await daemon?.cleanup();
     await inspection?.release();
     await manager.shutdown();
     await bridge.close();
     await providerSnapshotManager.shutdown();
+    await new Promise<void>((resolve, reject) =>
+      modelServer.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      }),
+    );
     await rm(root, { recursive: true, force: true });
   }
 }, 120_000);

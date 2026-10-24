@@ -1,0 +1,12 @@
+{
+  "upstream": "72e3316f4f5dfe775c77dbf998968c92e2de9019",
+  "upstreamVersion": "0.13.0",
+  "purpose": "Deliver Hub auto commands with authenticated arrival context and cancellation-safe continuations.",
+  "patches": [
+    {
+      "name": "hub-auto-command-delivery",
+      "origin": "local reviewed implementation",
+      "removeWhen": "Upstream provides equivalent command delivery, context isolation, and cancellation behavior."
+    }
+  ]
+}

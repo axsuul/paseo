@@ -30,6 +30,12 @@ export default async function paseoPlugin(input, options) {
     logPluginError("manifest", {}, error);
     throw error;
   }
+  const checkRoutedMessage = async (sessionID, messageID) => {
+    if (!messageID?.startsWith("msg_paseo_route_")) return;
+    await request(
+      `${INTERNAL_PREFIX}/sessions/${encodeURIComponent(sessionID)}/commands/${encodeURIComponent(messageID)}`,
+    );
+  };
   const tools = {};
   for (const definition of manifest.tools ?? []) {
     tools[`paseo_${definition.name}`] = {
@@ -68,6 +74,41 @@ export default async function paseoPlugin(input, options) {
 
   return {
     tool: tools,
+    "chat.message": async (message, output) => {
+      // Only the daemon's exact dispatch may supply trusted arrival context, including after a failed command.
+      for (const part of output.parts) {
+        if (part.metadata) delete part.metadata.paseoArrival;
+      }
+      let delivery;
+      try {
+        delivery = await request(
+          `${INTERNAL_PREFIX}/sessions/${encodeURIComponent(message.sessionID)}/commands/${encodeURIComponent(output.message.id)}`,
+          { method: "POST" },
+        );
+      } catch (error) {
+        if (error.status === 404) return;
+        throw error;
+      }
+      if (!delivery.command) return;
+      const part = output.parts.find((candidate) => candidate.type === "text");
+      if (!part) throw new Error("Delivered command has no text part");
+      part.metadata = {
+        ...part.metadata,
+        paseoArrival: {
+          ...delivery.command.context,
+          ...(delivery.continuationMessageID
+            ? { continuationMessageID: delivery.continuationMessageID }
+            : {}),
+        },
+      };
+    },
+    "chat.params": async ({ sessionID, message }) => checkRoutedMessage(sessionID, message.id),
+    "tool.execute.before": async ({ sessionID }) => {
+      const messages = await input.client.session.messages({ path: { id: sessionID } });
+      if (messages.error) throw new Error("Cannot verify the current command arrival");
+      const user = messages.data?.findLast(({ info }) => info.role === "user");
+      await checkRoutedMessage(sessionID, user?.info.id);
+    },
     "shell.env": async ({ cwd, sessionID }, output) => {
       if (!sessionID) return;
       let context;

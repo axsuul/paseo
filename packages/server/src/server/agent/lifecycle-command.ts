@@ -68,9 +68,11 @@ async function requestAgentRunCancellation(
 
   const hasInFlightRun = agentManager.hasInFlightRun(agentId);
   if (!hasInFlightRun) {
+    // Revoke delayed commands even when the router's confirmation turn has already gone idle.
+    await agentManager.cancelAgentRun(agentId);
     logger.trace(
       { agentId, lifecycle: agent.lifecycle, hasInFlightRun },
-      "cancelAgentRunCommand: skipping because agent is not running",
+      "cancelAgentRunCommand: cleared pending commands while agent is idle",
     );
     return { agent, cancelled: false, cancellation: { status: "not_running" } };
   }

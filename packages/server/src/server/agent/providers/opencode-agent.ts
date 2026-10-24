@@ -1503,6 +1503,7 @@ export class OpenCodeAgentClient implements AgentClient {
         false,
         unbindBridge,
         connectServer,
+        this.bridge,
       );
     } catch (error) {
       await connection.release();
@@ -1558,6 +1559,7 @@ export class OpenCodeAgentClient implements AgentClient {
         registeredAcquisition !== null,
         unbindBridge,
         connectServer,
+        this.bridge,
       );
     } catch (error) {
       await connection.release();
@@ -3458,6 +3460,7 @@ class OpenCodeAgentSession implements AgentSession {
     private readonly externallyDriven = false,
     releaseBridge?: () => void,
     connectServer?: () => Promise<OpenCodeServerConnection>,
+    private readonly bridge?: OpenCodeBridge,
   ) {
     this.config = config;
     this.server = {
@@ -3653,10 +3656,15 @@ class OpenCodeAgentSession implements AgentSession {
     }
   }
 
+  cancelPendingCommand(): void {
+    this.bridge?.revokeCommand(this.sessionId);
+  }
+
   async steerActiveTurn(
     prompt: AgentPromptInput,
     options: SteerActiveTurnOptions,
   ): Promise<SteerResult> {
+    if (options.command) throw new Error("Command delivery requires an idle OpenCode session");
     if (this.closed || this.activeForegroundTurnId !== options.expectedTurnId) {
       return { status: "unavailable" };
     }
@@ -3880,6 +3888,7 @@ class OpenCodeAgentSession implements AgentSession {
     if (this.turnState.status !== "idle") {
       throw new Error("OpenCode is still stopping the previous turn");
     }
+    const command = await this.prepareCommand(prompt, options);
 
     this.runningToolCalls.clear();
     this.subAgentsByCallId.clear();
@@ -3906,7 +3915,7 @@ class OpenCodeAgentSession implements AgentSession {
     this.turnState = { status: "running", turnId };
     this.notifySubscribers({ type: "turn_started", provider: "opencode" }, turnId);
 
-    const slashCommand = await this.resolveSlashCommandInvocation(prompt);
+    const slashCommand = command;
     if (slashCommand) {
       if (slashCommand.commandName === "compact" || slashCommand.commandName === "summarize") {
         this.activeDispatchMessageId = null;
@@ -3948,6 +3957,8 @@ class OpenCodeAgentSession implements AgentSession {
       // command() is only dispatch acknowledgement. OpenCode session events are
       // the source of truth for when the command turn becomes idle or fails.
       this.activeDispatchMessageId = createOpenCodeMessageId();
+      const commandMessageId = this.activeDispatchMessageId;
+      this.stageCommand(commandMessageId, options);
       void this.client.session
         .command({
           sessionID: this.sessionId,
@@ -3996,6 +4007,9 @@ class OpenCodeAgentSession implements AgentSession {
             { type: "turn_failed", provider: "opencode", error: toDiagnosticErrorMessage(err) },
             turnId,
           );
+        })
+        .finally(() => {
+          this.bridge?.clearCommand(this.sessionId, commandMessageId);
         });
     } else {
       const dispatchMessageId = createOpenCodeMessageId();
@@ -4093,6 +4107,21 @@ class OpenCodeAgentSession implements AgentSession {
         { cause: error },
       );
     }
+  }
+
+  private prepareCommand(
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+  ): Promise<{ commandName: string; args?: string } | null> {
+    if (!options?.command) return this.resolveSlashCommandInvocation(prompt);
+    if (!this.bridge) throw new Error("Command context requires the OpenCode bridge");
+    return Promise.resolve({ commandName: options.command.name, args: options.command.arguments });
+  }
+
+  private stageCommand(messageId: string, options?: AgentRunOptions): void {
+    if (!options?.command) return;
+    if (!this.bridge) throw new Error("Command context requires the OpenCode bridge");
+    this.bridge.stageCommand(this.sessionId, messageId, options.command);
   }
 
   private rethrowRunnerWaitError(error: unknown): never {
@@ -4723,6 +4752,8 @@ class OpenCodeAgentSession implements AgentSession {
     if (this.activeForegroundTurnId !== turnId) {
       return;
     }
+    if (this.activeDispatchMessageId)
+      this.bridge?.clearCommand(this.sessionId, this.activeDispatchMessageId);
     if (event.type === "turn_canceled" || event.type === "turn_failed") {
       this.synthesizeInterruptedToolCalls(turnId);
     } else {
@@ -4741,6 +4772,9 @@ class OpenCodeAgentSession implements AgentSession {
   }
 
   private issueStop(turnId: string | null): Promise<void> {
+    this.bridge?.revokeCommand(this.sessionId);
+    if (this.activeDispatchMessageId)
+      this.bridge?.clearCommand(this.sessionId, this.activeDispatchMessageId);
     if (this.turnState.status === "stopping") {
       // Stop pressed again during a stop retries that same stop. There is one
       // runner per session, so a second boundary would race the first — and

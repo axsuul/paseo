@@ -460,6 +460,7 @@ export interface DaemonClientTrace {
 }
 
 export interface SendMessageOptions {
+  command?: import("@getpaseo/protocol/messages").AgentCommand;
   sourceAgentId?: string;
   sourceAgentServerId?: string;
   sessionMode?: string;
@@ -3889,6 +3890,9 @@ export class DaemonClient {
     text: string,
     options: SendMessageOptions = {},
   ): Promise<{ deliveryStatus?: "queued" }> {
+    if (options.command && this.lastServerInfoMessage?.features?.agentCommandDelivery !== true) {
+      throw new Error("Update the Paseo host to deliver structured commands.");
+    }
     if (
       options.sourceAgentId &&
       this.lastServerInfoMessage?.features?.agentMessageProvenance !== true
@@ -3908,6 +3912,7 @@ export class DaemonClient {
       requestId,
       agentId,
       text,
+      command: options.command,
       sourceAgentId: options.sourceAgentId,
       sourceAgentServerId: options.sourceAgentServerId,
       sessionMode: options.sessionMode,

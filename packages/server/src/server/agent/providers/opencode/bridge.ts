@@ -36,6 +36,9 @@ interface OpenCodeBridgeOptions {
 interface OpenCodeSessionBinding {
   env: Record<string, string>;
   tools?: PaseoToolCatalog;
+  command?: { messageId: string; value: import("@getpaseo/protocol/messages").AgentCommand };
+  continuation?: { messageId: string; value: import("@getpaseo/protocol/messages").AgentCommand };
+  routedMessageId?: string;
 }
 
 interface BindOpenCodeSessionInput extends OpenCodeSessionBinding {
@@ -111,6 +114,32 @@ export class OpenCodeBridge {
     };
   }
 
+  stageCommand(
+    sessionId: string,
+    messageId: string,
+    command: import("@getpaseo/protocol/messages").AgentCommand,
+  ): void {
+    const binding = this.sessions.get(sessionId);
+    if (!binding) throw new Error("OpenCode session is not bound to a Paseo agent");
+    if (binding.command) throw new Error("OpenCode command delivery is already pending");
+    delete binding.continuation;
+    delete binding.routedMessageId;
+    binding.command = { messageId, value: command };
+  }
+
+  revokeCommand(sessionId: string): void {
+    const binding = this.sessions.get(sessionId);
+    if (!binding) return;
+    delete binding.command;
+    delete binding.continuation;
+    delete binding.routedMessageId;
+  }
+
+  clearCommand(sessionId: string, messageId: string): void {
+    const binding = this.sessions.get(sessionId);
+    if (binding?.command?.messageId === messageId) delete binding.command;
+  }
+
   decorateServerEnv(env: Record<string, string>): Record<string, string> {
     const pluginUrl = this.requirePluginUrl();
     const options: OpenCodePluginOptions = {
@@ -127,7 +156,7 @@ export class OpenCodeBridge {
       ...env,
       OPENCODE_CONFIG_CONTENT: JSON.stringify({
         ...config,
-        plugin: [...withoutBridge, [pluginUrl, options]],
+        plugin: [[pluginUrl, options], ...withoutBridge],
       }),
     };
   }
@@ -173,12 +202,20 @@ export class OpenCodeBridge {
       const contextMatch = url.pathname.match(
         new RegExp(`^${INTERNAL_PREFIX}/sessions/([^/]+)/context$`),
       );
+      const commandMatch = url.pathname.match(
+        new RegExp(`^${INTERNAL_PREFIX}/sessions/([^/]+)/commands/([^/]+)$`),
+      );
+      if (commandMatch) {
+        this.commandRequest(
+          request.method,
+          decodeURIComponent(commandMatch[1]),
+          decodeURIComponent(commandMatch[2]),
+          response,
+        );
+        return;
+      }
       if (request.method === "GET" && contextMatch) {
-        const binding = this.sessions.get(decodeURIComponent(contextMatch[1]));
-        if (!binding) {
-          sendJson(response, 404, { error: "OpenCode session is not bound to a Paseo agent" });
-          return;
-        }
+        const binding = this.requireBinding(decodeURIComponent(contextMatch[1]));
         sendJson(response, 200, {
           env: binding.env,
           ...(url.searchParams.has("tools")
@@ -226,6 +263,51 @@ export class OpenCodeBridge {
         response.destroy(failure);
       }
     }
+  }
+
+  private commandRequest(
+    method: string | undefined,
+    sessionId: string,
+    messageId: string,
+    response: ServerResponse,
+  ): void {
+    const binding = this.sessions.get(sessionId);
+    if (method === "GET") {
+      if (binding?.routedMessageId !== messageId)
+        throw new OpenCodeBridgeClientError(409, "Command arrival is no longer active");
+      sendJson(response, 200, {});
+      return;
+    }
+    if (method !== "POST") throw new OpenCodeBridgeClientError(405, "Method not allowed");
+    if (messageId.startsWith("msg_paseo_route_")) {
+      if (binding?.continuation?.messageId !== messageId)
+        throw new OpenCodeBridgeClientError(409, "Command arrival is no longer active");
+      const command = binding.continuation.value;
+      delete binding.continuation;
+      binding.routedMessageId = messageId;
+      sendJson(response, 200, { command });
+      return;
+    }
+    if (!binding)
+      throw new OpenCodeBridgeClientError(404, "OpenCode session is not bound to a Paseo agent");
+    const command = binding.command?.messageId === messageId ? binding.command.value : null;
+    let continuationMessageID: string | undefined;
+    if (command) {
+      delete binding.command;
+      continuationMessageID = `msg_paseo_route_${randomBytes(24).toString("hex")}`;
+      binding.continuation = { messageId: continuationMessageID, value: command };
+    } else {
+      delete binding.continuation;
+      delete binding.routedMessageId;
+    }
+    sendJson(response, 200, { command, continuationMessageID });
+  }
+
+  private requireBinding(sessionId: string): OpenCodeSessionBinding {
+    const binding = this.sessions.get(sessionId);
+    if (!binding)
+      throw new OpenCodeBridgeClientError(404, "OpenCode session is not bound to a Paseo agent");
+    return binding;
   }
 
   private serializeManifest(): Array<Record<string, unknown>> {
