@@ -1,0 +1,30 @@
+{
+  "upstreamRepository": "https://github.com/getpaseo/paseo",
+  "upstreamTag": "v0.13.0",
+  "upstreamCommit": "d34d17a9072149320ace35ec2a2e5c7dcd992cb3",
+  "patches": [
+    {
+      "repository": "https://github.com/getpaseo/paseo",
+      "commit": "3960378818a40cd6a9acfa94813143f2aaf76d5e",
+      "pullRequest": 6092,
+      "reason": "Read checkout identity without computing full status during reconciliation.",
+      "removalCondition": "The selected stable release includes identity-only checkout reads."
+    },
+    {
+      "repository": "https://github.com/getpaseo/paseo",
+      "commit": "c334b38a5d2a3cd51dfa08b484555d0a10f04fdf",
+      "pullRequest": 6092,
+      "reason": "Share checkout identity normalization with full status reads.",
+      "removalCondition": "The selected stable release includes equivalent shared normalization."
+    }
+  ],
+  "adaptation": "Preserve 0.13 cached classification-transition refresh. Replace removed peekSnapshot assertions with observable getSnapshot dependency checks; retain status equivalence, cadence, and archival checks.",
+  "runtimeBuild": {
+    "dockerfile": "docker/base/Dockerfile",
+    "platform": "linux/amd64",
+    "nodeImage": "node:22-bookworm-slim",
+    "registry": "ghcr.io/axsuul/paseo",
+    "tagRule": "The complete first 12 characters of the composition commit."
+  },
+  "sourcePolicy": "Local-only maintained source. No remote source publication."
+}
