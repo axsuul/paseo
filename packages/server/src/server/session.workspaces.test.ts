@@ -9948,6 +9948,9 @@ test("workspace PR status survives session cleanup and reconnect", async () => {
     authProbeCanThrow: true,
     invalidate: () => {},
   } as unknown as ForgeService;
+  let checkoutStatusReads = 0;
+  let pullRequestReads = 0;
+  let checkoutStatusGate: Promise<void> = Promise.resolve();
   const gitService = new WorkspaceGitServiceImpl({
     logger: createTestLogger() as unknown as pino.Logger,
     paseoHome: "/tmp/paseo-test",
@@ -9958,26 +9961,33 @@ test("workspace PR status survives session cleanup and reconnect", async () => {
         ...current,
         upstreamStatus: f.upstreamStatus,
       }),
-      getCheckoutStatus: async () => checkoutStatus,
+      getCheckoutStatus: async () => {
+        checkoutStatusReads += 1;
+        await checkoutStatusGate;
+        return checkoutStatus;
+      },
       getCheckoutShortstat: async () => ({ additions: 1, deletions: 0 }),
       getCheckoutWorktreeState: async () => ({
         isDirty: false,
         diffStat: { additions: 1, deletions: 0 },
       }),
-      getPullRequestStatus: async () => ({
-        status: {
-          url: "https://github.com/acme/repo/pull/123",
-          title: "Merged feature",
-          state: "merged",
-          baseRefName: "main",
-          headRefName: "feature",
-          isMerged: true,
-          checksStatus: "success",
-        },
-        authState: "authenticated",
-        featuresEnabled: true,
-        githubFeaturesEnabled: true,
-      }),
+      getPullRequestStatus: async () => {
+        pullRequestReads += 1;
+        return {
+          status: {
+            url: "https://github.com/acme/repo/pull/123",
+            title: "Merged feature",
+            state: "merged",
+            baseRefName: "main",
+            headRefName: "feature",
+            isMerged: true,
+            checksStatus: "success",
+          },
+          authState: "authenticated",
+          featuresEnabled: true,
+          githubFeaturesEnabled: true,
+        };
+      },
       forgeOverrides: { github: githubStub },
       resolveAbsoluteGitDir: async () => path.join(cwd, ".git"),
       hasOriginRemote: async () => false,
@@ -10032,6 +10042,12 @@ test("workspace PR status survives session cleanup and reconnect", async () => {
 
   // Client disconnect past the reconnect grace (or any routed-session drop).
   await session1.cleanup();
+  const checkoutStatusReadsBeforeReconnect = checkoutStatusReads;
+  const pullRequestReadsBeforeReconnect = pullRequestReads;
+  let releaseCheckoutStatus = () => {};
+  checkoutStatusGate = new Promise((resolve) => {
+    releaseCheckoutStatus = resolve;
+  });
 
   const emitted2: SessionOutboundMessage[] = [];
   const session2 = createSessionForWorkspaceTests({
@@ -10054,7 +10070,30 @@ test("workspace PR status survives session cleanup and reconnect", async () => {
     // in the directory listing instead of a descriptor with no githubRuntime at all.
     expect(entry?.githubRuntime).toBeDefined();
     expect(reconnectEntryPrUrl).toBe("https://github.com/acme/repo/pull/123");
+
+    // Checkout status answers from the last known state while the reconnect refresh is still reading Git.
+    await session2.handleMessage({
+      type: "checkout_status_request",
+      cwd,
+      requestId: "status-after-reconnect",
+    });
+    expect(filterByType(emitted2, "checkout_status_response")[0]?.payload).toMatchObject({
+      currentBranch: "feature",
+      error: null,
+      requestId: "status-after-reconnect",
+    });
+    await vi.waitFor(() => {
+      expect(checkoutStatusReads).toBe(checkoutStatusReadsBeforeReconnect + 1);
+    });
+    releaseCheckoutStatus();
+    await vi.waitFor(() => {
+      expect(gitService.getMetrics().workspaceRefreshInFlightCount).toBe(0);
+    });
+    // Reconnecting runs one Git refresh and leaves pull request state to the status poll instead of a full first-observation refresh.
+    expect(checkoutStatusReads).toBe(checkoutStatusReadsBeforeReconnect + 1);
+    expect(pullRequestReads).toBe(pullRequestReadsBeforeReconnect);
   } finally {
+    releaseCheckoutStatus();
     await session2.cleanup();
     await gitService.dispose();
   }

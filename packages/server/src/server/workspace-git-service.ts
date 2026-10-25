@@ -123,6 +123,8 @@ const WORKSPACE_GIT_AUXILIARY_READ_TTL_MS = 15_000;
 const WORKSPACE_GIT_INTERNAL_MIN_GAP_MS = 2_000;
 // Small values (booleans, short strings, small arrays); generous cap.
 const WORKSPACE_GIT_AUXILIARY_CACHE_MAX = 256;
+// Backstop for state kept after the last observer leaves; archive and removal forget entries first, and an evicted workspace only pays one full initial refresh.
+const WORKSPACE_GIT_RETAINED_STATE_MAX = 2_000;
 
 function mergeSets<T>(
   left: ReadonlySet<T>,
@@ -250,6 +252,8 @@ export interface WorkspaceGitService {
   scheduleRefreshForCwd(cwd: string): void;
   onWorkspaceStateMayHaveChanged(cwd: string): void;
   invalidateForge(cwd: string): void;
+  /** Drops state kept for a workspace directory that no active workspace uses anymore. */
+  forgetWorkspace(cwd: string): void;
   getMetrics(): WorkspaceGitServiceMetrics;
   dispose(): Promise<void>;
 }
@@ -397,6 +401,14 @@ interface WorkspaceGitServiceOptions {
   deps?: Partial<WorkspaceGitServiceDependencies>;
 }
 
+interface RetainedWorkspaceGitState {
+  latestGit: WorkspaceGitRuntimeSnapshot["git"] | null;
+  latestForge: WorkspaceGitRuntimeSnapshot["forge"] | null;
+  latestSnapshot: WorkspaceGitRuntimeSnapshot;
+  latestFacts: CheckoutSnapshotFacts | null;
+  latestFingerprint: string | null;
+}
+
 class WorkspaceGitServiceDisposedError extends Error {
   constructor() {
     super("WorkspaceGitService is disposed");
@@ -433,6 +445,10 @@ interface WorkspaceGitTarget {
   latestFacts: CheckoutSnapshotFacts | null;
   factsPromise: Promise<CheckoutSnapshotFacts> | null;
   latestFingerprint: string | null;
+  // True while the snapshot came from a retired target and no refresh of this target has confirmed it yet.
+  revalidateRetainedSnapshot: boolean;
+  // False once the directory was archived or removed, so retiring this target does not keep its state.
+  retainOnRetire: boolean;
   lastShellOutAtMs: number | null;
   repoGitRoot: string | null;
   observationSetupPromise: Promise<void> | null;
@@ -605,6 +621,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   private disposePromise: Promise<void> | null = null;
   private readonly snapshotUpdatedListeners = new Set<WorkspaceGitSnapshotUpdatedListener>();
   private readonly workspaceTargets = new Map<string, WorkspaceGitTarget>();
+  private readonly retainedWorkspaceStates = new LRUCache<string, RetainedWorkspaceGitState>({
+    max: WORKSPACE_GIT_RETAINED_STATE_MAX,
+  });
   private readonly repoTargets = new Map<string, RepoGitTarget>();
   private readonly workingTreeWatchTargets = new Map<string, WorkingTreeWatchTarget>();
   private readonly workingTreeWatchSetups = new Map<string, Promise<WorkingTreeWatchTarget>>();
@@ -666,7 +685,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     if (target.listeners.size === 1) {
       this.startWorkspaceSubscriptionTimers(target);
     }
-    if (!target.latestSnapshot) {
+    if (target.latestSnapshot) {
+      this.scheduleRetainedSnapshotRevalidation(target);
+    } else {
       this.scheduleInitialWorkspaceRefresh(target);
     }
     this.scheduleWorkspaceObservationSetup(target);
@@ -752,6 +773,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     const request = this.normalizeRefreshRequest(options, "getSnapshot");
     const target = this.ensureWorkspaceTarget(cwd);
     if (!request.force && target.latestSnapshot) {
+      this.scheduleRetainedSnapshotRevalidation(target);
       return target.latestSnapshot;
     }
 
@@ -1038,6 +1060,23 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
     this.forgeResolver.invalidate(resolve(cwd));
   }
 
+  forgetWorkspace(cwd: string): void {
+    if (this.disposed) {
+      return;
+    }
+    const normalizedCwd = resolve(cwd);
+    this.retainedWorkspaceStates.delete(normalizedCwd);
+    const target = this.workspaceTargets.get(normalizedCwd);
+    if (!target) {
+      return;
+    }
+    target.retainOnRetire = false;
+    // Unobserved targets only hold state from direct reads, so drop them now instead of waiting for a listener that will not come.
+    if (target.listeners.size === 0) {
+      this.removeWorkspaceTarget(target);
+    }
+  }
+
   dispose(): Promise<void> {
     if (this.disposePromise) return this.disposePromise;
     this.disposed = true;
@@ -1049,6 +1088,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       this.closeWorkspaceTarget(target);
     }
     this.workspaceTargets.clear();
+    this.retainedWorkspaceStates.clear();
 
     for (const target of this.repoTargets.values()) {
       this.closeRepoTarget(target);
@@ -1206,6 +1246,9 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
   }
 
   private createWorkspaceTarget(cwd: string): WorkspaceGitTarget {
+    // Start from the retired target's state when every observer left and one returns, for example when the app reconnects to a daemon with many workspaces.
+    const retained = this.retainedWorkspaceStates.get(cwd) ?? null;
+    this.retainedWorkspaceStates.delete(cwd);
     const target: WorkspaceGitTarget = {
       gitDirPaths: null,
       cwd,
@@ -1217,15 +1260,17 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       forgePrStatusPollSubscription: null,
       forgePrStatusPollKey: null,
       refreshState: { status: "idle" },
-      latestGit: null,
+      latestGit: retained?.latestGit ?? null,
       latestGitLoadedAtMs: null,
-      latestForge: null,
+      latestForge: retained?.latestForge ?? null,
       latestForgeLoadedAtMs: null,
-      latestSnapshot: null,
+      latestSnapshot: retained?.latestSnapshot ?? null,
       latestSnapshotLoadedAtMs: null,
-      latestFacts: null,
+      latestFacts: retained?.latestFacts ?? null,
       factsPromise: null,
-      latestFingerprint: null,
+      latestFingerprint: retained?.latestFingerprint ?? null,
+      revalidateRetainedSnapshot: retained !== null,
+      retainOnRetire: true,
       lastShellOutAtMs: null,
       repoGitRoot: null,
       observationSetupPromise: null,
@@ -1250,6 +1295,46 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         reason: "initial",
         queueIfBusy: false,
         movedRemoteRefs: new Set(),
+      });
+    });
+  }
+
+  // Revalidate a retained snapshot once in the background when it is first used, because watches were off while the workspace was unobserved and may have missed changes.
+  private scheduleRetainedSnapshotRevalidation(target: WorkspaceGitTarget): void {
+    if (!target.revalidateRetainedSnapshot) {
+      return;
+    }
+    target.revalidateRetainedSnapshot = false;
+    const retainedSnapshot = target.latestSnapshot;
+    queueMicrotask(() => {
+      if (target.closed || this.workspaceTargets.get(target.cwd) !== target) {
+        return;
+      }
+      // Observed workspaces get pull request state from their forge status poll, so skip the per-workspace forge read that made reconnect bursts expensive.
+      this.requestWorkspaceSnapshot(target, {
+        force: false,
+        refreshStructure: true,
+        refreshWorktree: true,
+        includeForge: target.listeners.size === 0,
+        reason: "revalidate-retained",
+        queueIfBusy: false,
+        movedRemoteRefs: new Set(),
+      }).catch((error) => {
+        if (this.disposed || target.closed || this.workspaceTargets.get(target.cwd) !== target) {
+          return;
+        }
+        this.logger.warn(
+          { err: error, cwd: target.cwd },
+          "Failed to revalidate retained workspace git snapshot",
+        );
+        // Stop serving the retained snapshot when it cannot be confirmed, so the next read reports the real state instead of an indefinitely stale one.
+        if (target.latestSnapshot === retainedSnapshot) {
+          target.latestGit = null;
+          target.latestForge = null;
+          target.latestSnapshot = null;
+          target.latestFacts = null;
+          target.latestFingerprint = null;
+        }
       });
     });
   }
@@ -3203,6 +3288,7 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
           break;
         }
         snapshot = admittedSnapshot;
+        target.revalidateRetainedSnapshot = false;
         this.rememberSnapshot(target, snapshot, {
           forceEmit:
             request.force || (request.emitUnchanged === true && request.movedRemoteRefs.size > 0),
@@ -3659,7 +3745,22 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
       return;
     }
 
+    this.retainWorkspaceState(target);
     this.removeWorkspaceTarget(target);
+  }
+
+  // Keep the last published state when the final observer leaves, so a reconnecting client reads it immediately and the daemon avoids a full initial refresh per workspace.
+  private retainWorkspaceState(target: WorkspaceGitTarget): void {
+    if (!target.retainOnRetire || !target.latestSnapshot) {
+      return;
+    }
+    this.retainedWorkspaceStates.set(target.cwd, {
+      latestGit: target.latestGit,
+      latestForge: target.latestForge,
+      latestSnapshot: target.latestSnapshot,
+      latestFacts: target.latestFacts,
+      latestFingerprint: target.latestFingerprint,
+    });
   }
 
   private removeWorkspaceTarget(target: WorkspaceGitTarget): void {

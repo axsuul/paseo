@@ -353,7 +353,9 @@ describe("WorkspaceGitServiceImpl", () => {
   test("shared watches publish to the runtime store before listeners and retain data after teardown", async () => {
     const subscribe = vi.fn(async () => createAsyncSubscription());
     const getPullRequestStatus = vi.fn(async () => createPullRequestStatusResult());
-    const service = createService({ subscribe, getPullRequestStatus });
+    let isDirty = false;
+    const getCheckoutStatus = vi.fn(async (cwd: string) => createCheckoutStatus(cwd, { isDirty }));
+    const service = createService({ subscribe, getPullRequestStatus, getCheckoutStatus });
     const store = createWorkspaceRuntimeStore();
     service.onSnapshotUpdated((snapshot) => store.set(snapshot));
     const observed: WorkspaceGitRuntimeSnapshot[] = [];
@@ -381,6 +383,68 @@ describe("WorkspaceGitServiceImpl", () => {
     expect(getPullRequestStatus).toHaveBeenCalledTimes(pollCount);
     expect(subscribe).toHaveBeenCalledTimes(subscriptionCount);
     expect(store.get(REPO_CWD)).toBe(snapshot);
+
+    // The checkout became dirty while nobody watched it, then two clients reconnect.
+    isDirty = true;
+    const statusReadCount = getCheckoutStatus.mock.calls.length;
+    const reconnected: WorkspaceGitRuntimeSnapshot[] = [];
+    const third = service.registerWorkspace({ cwd: REPO_CWD }, (next) => reconnected.push(next));
+    const fourth = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await expect(service.getSnapshot(REPO_CWD)).resolves.toBe(snapshot);
+    await vi.waitFor(() => {
+      expect(reconnected.at(-1)?.git.isDirty).toBe(true);
+    });
+    expect(store.get(REPO_CWD)?.git.isDirty).toBe(true);
+    expect(store.get(REPO_CWD)?.forge.pullRequest).toEqual(snapshot?.forge.pullRequest);
+    // One shared Git refresh confirms the reconnected state, and it skips the per-workspace pull request read of a first observation.
+    expect(getCheckoutStatus).toHaveBeenCalledTimes(statusReadCount + 1);
+    expect(getPullRequestStatus).toHaveBeenCalledTimes(pollCount);
+
+    // A direct read without observers also answers from retained state and refreshes it in the background.
+    third.unsubscribe();
+    fourth.unsubscribe();
+    const dirtySnapshot = store.get(REPO_CWD);
+    isDirty = false;
+    await expect(service.getSnapshot(REPO_CWD)).resolves.toBe(dirtySnapshot);
+    await vi.waitFor(() => {
+      expect(store.get(REPO_CWD)?.git.isDirty).toBe(false);
+    });
+
+    // A forced read of retained state still reads the checkout before answering.
+    service.registerWorkspace({ cwd: REPO_CWD }, vi.fn()).unsubscribe();
+    isDirty = true;
+    const forced = await service.getSnapshot(REPO_CWD, { force: true, reason: "forced-read" });
+    expect(forced.git.isDirty).toBe(true);
+
+    // Archiving or removing the workspace forgets retained state, so later reads see the checkout again.
+    service.forgetWorkspace(REPO_CWD);
+    expect(service.getMetrics().workspaceTargetCount).toBe(0);
+    isDirty = false;
+    await expect(service.getSnapshot(REPO_CWD)).resolves.toMatchObject({
+      git: { isDirty: false },
+    });
+    const archived = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    service.forgetWorkspace(REPO_CWD);
+    archived.unsubscribe();
+    isDirty = true;
+    await expect(service.getSnapshot(REPO_CWD)).resolves.toMatchObject({
+      git: { isDirty: true },
+    });
+
+    // Retained state that cannot be confirmed stops being served, for example after the checkout disappeared.
+    service.registerWorkspace({ cwd: REPO_CWD }, vi.fn()).unsubscribe();
+    const unconfirmed = store.get(REPO_CWD);
+    const failedReadCount = getCheckoutStatus.mock.calls.length + 1;
+    getCheckoutStatus.mockRejectedValueOnce(new Error("checkout is gone"));
+    await expect(service.getSnapshot(REPO_CWD)).resolves.toBe(unconfirmed);
+    await vi.waitFor(() => {
+      expect(getCheckoutStatus).toHaveBeenCalledTimes(failedReadCount);
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    isDirty = false;
+    await expect(service.getSnapshot(REPO_CWD)).resolves.toMatchObject({
+      git: { isDirty: false },
+    });
     await service.dispose();
   });
 

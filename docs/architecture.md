@@ -84,6 +84,13 @@ Refcounted git watches feed the store through snapshot-updated events; their lif
 refresh only. Session cleanup and workspace archive retain the data. Removing the final active
 workspace for a directory clears it. The store lives in memory and resets on daemon restart.
 
+When the last watch for a directory closes, the git service also keeps that directory's last
+snapshot and checkout facts. A returning watch or a non-forced snapshot read starts from that
+state and revalidates it with one background Git refresh instead of a full initial refresh, so a
+client reconnecting to many workspaces neither waits for nor triggers a refresh burst. Forced
+reads still refresh before answering. Archiving or removing the final active workspace for a
+directory forgets this state.
+
 **Key modules:**
 
 | Module                          | Responsibility                                                                 |

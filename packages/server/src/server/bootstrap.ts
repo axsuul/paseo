@@ -962,13 +962,16 @@ export async function createPaseoDaemon(
   const workspaceRuntimeStore = createWorkspaceRuntimeStore();
   workspaceGitService.onSnapshotUpdated((snapshot) => workspaceRuntimeStore.set(snapshot));
   workspaceRegistry.subscribeToMutations(async (mutation) => {
-    if (mutation.kind === "remove" && mutation.workspace) {
+    if ((mutation.kind === "remove" || mutation.kind === "archive") && mutation.workspace) {
       const cwd = path.resolve(mutation.workspace.cwd);
       const workspaces = await workspaceRegistry.list();
       const hasActiveWorkspace = workspaces.some(
         (workspace) => !workspace.archivedAt && path.resolve(workspace.cwd) === cwd,
       );
-      if (!hasActiveWorkspace) workspaceRuntimeStore.remove(cwd);
+      if (!hasActiveWorkspace) {
+        workspaceGitService.forgetWorkspace(cwd);
+        if (mutation.kind === "remove") workspaceRuntimeStore.remove(cwd);
+      }
     }
     if (mutation.kind === "archive" && mutation.workspace) {
       pluginRuntime.emit("workspace.archive.after", {

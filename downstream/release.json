@@ -16,6 +16,14 @@
       "pullRequest": 6092,
       "reason": "Share checkout identity normalization with full status reads.",
       "removalCondition": "The selected stable release includes equivalent shared normalization."
+    },
+    {
+      "name": "workspace-git-snapshot-retention",
+      "repository": "https://github.com/getpaseo/paseo",
+      "issue": 7760,
+      "origin": "local reviewed implementation",
+      "reason": "Retain workspace Git snapshots across reconnects so clients read the last known state immediately and the daemon revalidates once instead of running a full initial refresh for every workspace.",
+      "removeWhen": "Upstream ships workspace Git snapshot retention across reconnects or fixes issue #7760."
     }
   ],
   "adaptation": "Preserve 0.13 cached classification-transition refresh. Replace removed peekSnapshot assertions with observable getSnapshot dependency checks; retain status equivalence, cadence, and archival checks.",
