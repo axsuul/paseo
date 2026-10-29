@@ -5,8 +5,14 @@
   "patches": [
     {
       "name": "hub-auto-command-delivery",
+      "commit": "f15fdc608668d4e486a0505076ea2fbf4328b0cb",
       "origin": "local reviewed implementation",
       "removeWhen": "Upstream provides equivalent command delivery, context isolation, and cancellation behavior."
+    },
+    {
+      "name": "order-independent-command-context",
+      "origin": "local authenticated live-hook delivery repair",
+      "removeWhen": "Upstream delivers authenticated command context to consumers independently of global and injected plugin load order."
     }
   ]
 }

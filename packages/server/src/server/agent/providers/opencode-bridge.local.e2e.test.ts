@@ -86,7 +86,8 @@ export default async () => {
   return {
     "command.execute.before": async (input) => { command = input; },
     "chat.message": async (input, output) => {
-      await writeFile(${JSON.stringify(observed)}, JSON.stringify({command, input, output}));
+      const delivery = output[Symbol.for("paseo.commandDelivery")];
+      await writeFile(${JSON.stringify(observed)}, JSON.stringify({command, input, output, delivery}));
       if (command.arguments === "pause after claim") {
         while (await readFile(${JSON.stringify(path.join(root, "release"))}, "utf8").catch(() => "") !== "yes") await new Promise(resolve => setTimeout(resolve, 10));
         return;
@@ -178,9 +179,10 @@ export default async () => {
     await daemon.client.waitForFinish(agent.id, 30_000);
     const result = JSON.parse(await readFile(observed, "utf8"));
     expect(result.command).toMatchObject({ command: "auto", arguments: "only the request" });
-    expect(result.output.parts[0].metadata.paseoArrival).toMatchObject(arrival);
-    const continuationMessageID =
-      result.output.parts[0].metadata.paseoArrival.continuationMessageID;
+    expect(result.delivery.context).toEqual(arrival);
+    expect(result.output.parts[0].metadata?.paseoArrival).toBeUndefined();
+    expect(JSON.stringify(result.output)).not.toContain("paseo.commandDelivery");
+    const continuationMessageID = result.delivery.continuationMessageID;
     expect(continuationMessageID).toMatch(/^msg_paseo_route_/);
     const sessionID = result.output.message.sessionID;
     const foreign = await sdk.session.create({ directory: root });
@@ -207,7 +209,7 @@ export default async () => {
     expect(validRoute.error).toBeDefined();
     const routed = JSON.parse(await readFile(observed, "utf8"));
     expect(routed.output.message.id).toBe(continuationMessageID);
-    expect(routed.output.parts[0].metadata.paseoArrival).toEqual(arrival);
+    expect(routed.delivery.context).toEqual(arrival);
     const replay = await sdk.session.command({
       sessionID,
       directory: root,
@@ -227,7 +229,7 @@ export default async () => {
     });
     await daemon.client.waitForFinish(agent.id, 30_000);
     const second = JSON.parse(await readFile(observed, "utf8"));
-    const canceledMessageID = second.output.parts[0].metadata.paseoArrival.continuationMessageID;
+    const canceledMessageID = second.delivery.continuationMessageID;
     await daemon.client.cancelAgent(agent.id);
     const canceledRoute = await sdk.session.command({
       sessionID,
@@ -246,7 +248,7 @@ export default async () => {
     });
     await daemon.client.waitForFinish(agent.id, 30_000);
     const third = JSON.parse(await readFile(observed, "utf8"));
-    const claimedMessageID = third.output.parts[0].metadata.paseoArrival.continuationMessageID;
+    const claimedMessageID = third.delivery.continuationMessageID;
     const afterClaim = sdk.session.command({
       sessionID,
       directory: root,
@@ -273,7 +275,7 @@ export default async () => {
     const toolCommand = sdk.session.command({
       sessionID,
       directory: root,
-      messageID: toolInitial.output.parts[0].metadata.paseoArrival.continuationMessageID,
+      messageID: toolInitial.delivery.continuationMessageID,
       command: "auto",
       arguments: "pause model",
       model: "local/test",
@@ -294,13 +296,13 @@ export default async () => {
     await daemon.client.waitForFinish(agent.id, 30_000);
     const manual = JSON.parse(await readFile(observed, "utf8"));
     expect(manual.output.parts[0].metadata?.paseoArrival).toBeUndefined();
+    expect(manual.delivery).toBeUndefined();
     await daemon.client.sendMessage(agent.id, "restart request", {
       command: { name: "auto", arguments: "restart request", context: arrival },
     });
     await daemon.client.waitForFinish(agent.id, 30_000);
     const beforeRestart = JSON.parse(await readFile(observed, "utf8"));
-    const staleMessageID =
-      beforeRestart.output.parts[0].metadata.paseoArrival.continuationMessageID;
+    const staleMessageID = beforeRestart.delivery.continuationMessageID;
     await bridge.close();
     await bridge.start();
     await manager.shutdown();

@@ -90,17 +90,17 @@ export default async function paseoPlugin(input, options) {
         throw error;
       }
       if (!delivery.command) return;
-      const part = output.parts.find((candidate) => candidate.type === "text");
-      if (!part) throw new Error("Delivered command has no text part");
-      part.metadata = {
-        ...part.metadata,
-        paseoArrival: {
-          ...delivery.command.context,
-          ...(delivery.continuationMessageID
-            ? { continuationMessageID: delivery.continuationMessageID }
-            : {}),
-        },
+      if (!output.parts.some((part) => part.type === "text"))
+        throw new Error("Delivered command has no text part");
+      // Keep authenticated delivery on the live hook output when global plugins run before this bridge.
+      output[Symbol.for("paseo.commandDelivery")] = {
+        context: delivery.command.context,
+        ...(delivery.continuationMessageID
+          ? { continuationMessageID: delivery.continuationMessageID }
+          : {}),
       };
+      const consume = output[Symbol.for("paseo.consumeCommandDelivery")];
+      if (typeof consume === "function") consume();
     },
     "chat.params": async ({ sessionID, message }) => checkRoutedMessage(sessionID, message.id),
     "tool.execute.before": async ({ sessionID }) => {
