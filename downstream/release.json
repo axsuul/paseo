@@ -26,7 +26,7 @@
       "removeWhen": "Upstream ships workspace Git snapshot retention across reconnects or fixes issue #7760."
     }
   ],
-  "adaptation": "Replay the four deployed 0.14.0 patches onto the actual v0.15.3 release. Preserve both reconciliation test setups by taking the approved union of Vitest imports. No watcher-recovery or Git-concurrency changes are included.",
+  "adaptation": "Preserve the four deployed integrations on v0.15.3, then backport only PR #8734. Its tests require the upstream settle helpers and logger.info stub; use the advancing fake clock for recovery refresh assertions. Bound checkout inspection across all reconciliation projects with one service-owned p-limit queue of two. Preserve the unchanged workspace-create timing assertion under the explicitly approved baseline exception.",
   "order": [
     {
       "name": "hub-auto-command-delivery",
@@ -47,12 +47,21 @@
       "name": "order-independent-command-context",
       "commit": "0078f340fb7b337062945e02743bcd5bd89b80c4",
       "replayedFrom": "c2a3d5ff6fa01808ba0f8bb50582872fa4569109"
+    },
+    {
+      "name": "watcher-recovery",
+      "commit": "2dfa9382de9e701703b4509c134e402194114df3"
+    },
+    {
+      "name": "service-wide-background-checkout-bound-and-test-adaptation",
+      "commit": "632fbb89c820a48baee5e5f274d915d17bb3de32",
+      "concurrency": 2
     }
   ],
   "previousRelease": {
-    "upstreamTag": "v0.14.0",
-    "compositionCommit": "2e780639f6ef9ce984853de9f2c569f5b7837bd5",
-    "localTag": "custom-release-0.14.0-live-context-20261029"
+    "upstreamTag": "v0.15.3",
+    "compositionCommit": "1d9e11a5adfe45e6f277502f803b8d14966e47aa",
+    "localTag": "custom-release-0.15.3-lab1-20261107"
   },
   "runtimeBuild": {
     "dockerfile": "docker/base/Dockerfile",
@@ -60,6 +69,33 @@
     "nodeImage": "node:22-bookworm-slim",
     "registry": "ghcr.io/axsuul/paseo",
     "tagRule": "The complete first 12 characters of the composition commit."
+  },
+  "recoveryComposition": {
+    "previousCompositionCommit": "1d9e11a5adfe45e6f277502f803b8d14966e47aa",
+    "watcherRecovery": {
+      "repository": "https://github.com/getpaseo/paseo",
+      "pullRequest": 8734,
+      "upstreamCommit": "0952ddbd4bca85ea0a870256afde97275e59e22b",
+      "verifiedPullRequestHead": "128fbd90ccc55ffd44cf24c8e4ba96f7ba186aed",
+      "appliedCommit": "2dfa9382de9e701703b4509c134e402194114df3",
+      "reason": "Recover watcher setup timeouts, reject abandoned callbacks, and refresh missed metadata and exclusions.",
+      "removalCondition": "The selected stable release includes PR #8734."
+    },
+    "backgroundCheckoutBound": {
+      "origin": "local implementation",
+      "commit": "632fbb89c820a48baee5e5f274d915d17bb3de32",
+      "concurrency": 2,
+      "reason": "Prevent full reconciliation across projects from admitting every checkout read into the shared Git queue at once.",
+      "removalCondition": "The selected stable release bounds checkout inspection across the complete reconciliation service."
+    },
+    "baselineException": {
+      "test": "workspace create is admitted while 100 sibling observations hydrate",
+      "assertion": "create elapsed time is less than 30000 milliseconds",
+      "unchangedBaselineMilliseconds": 40084,
+      "patchedMilliseconds": 39745,
+      "scanIsolatedMilliseconds": 32351,
+      "approval": "User explicitly approved deployment with this demonstrated baseline failure: lets just deploy it and see how it goes. Keep current patch scope. No assertion change or separate creation-delay repair is authorized."
+    }
   },
   "sourcePolicy": "Local-only maintained source. No remote source publication."
 }
