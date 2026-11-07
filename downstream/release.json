@@ -1,7 +1,7 @@
 {
   "upstreamRepository": "https://github.com/getpaseo/paseo",
-  "upstreamTag": "v0.13.0",
-  "upstreamCommit": "d34d17a9072149320ace35ec2a2e5c7dcd992cb3",
+  "upstreamTag": "v0.15.3",
+  "upstreamCommit": "d91ae138cb931447635e94296023414a58bedcc5",
   "patches": [
     {
       "repository": "https://github.com/getpaseo/paseo",
@@ -26,7 +26,34 @@
       "removeWhen": "Upstream ships workspace Git snapshot retention across reconnects or fixes issue #7760."
     }
   ],
-  "adaptation": "Preserve 0.13 cached classification-transition refresh. Replace removed peekSnapshot assertions with observable getSnapshot dependency checks; retain status equivalence, cadence, and archival checks.",
+  "adaptation": "Replay the four deployed 0.14.0 patches onto the actual v0.15.3 release. Preserve both reconciliation test setups by taking the approved union of Vitest imports. No watcher-recovery or Git-concurrency changes are included.",
+  "order": [
+    {
+      "name": "hub-auto-command-delivery",
+      "commit": "bbabc2e5a2ce2ef83e007c3e807d840100b85fc4",
+      "replayedFrom": "661498a6304ed31a9ff4b4722272d8847808a1bc"
+    },
+    {
+      "name": "checkout-identity",
+      "commit": "2ed46dc7a2588fd804c0e6b38bb059688b54896e",
+      "replayedFrom": "80c5d176fb42736b4bf35f2d3e5ced80a7f6c4f5"
+    },
+    {
+      "name": "workspace-git-snapshot-retention",
+      "commit": "26392ca4f252da07b700a0068cf70f18684b0263",
+      "replayedFrom": "1aa08979e1581fe467796d98e72ad43a469edf37"
+    },
+    {
+      "name": "order-independent-command-context",
+      "commit": "0078f340fb7b337062945e02743bcd5bd89b80c4",
+      "replayedFrom": "c2a3d5ff6fa01808ba0f8bb50582872fa4569109"
+    }
+  ],
+  "previousRelease": {
+    "upstreamTag": "v0.14.0",
+    "compositionCommit": "2e780639f6ef9ce984853de9f2c569f5b7837bd5",
+    "localTag": "custom-release-0.14.0-live-context-20261029"
+  },
   "runtimeBuild": {
     "dockerfile": "docker/base/Dockerfile",
     "platform": "linux/amd64",

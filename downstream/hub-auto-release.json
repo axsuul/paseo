@@ -1,6 +1,6 @@
 {
-  "upstream": "72e3316f4f5dfe775c77dbf998968c92e2de9019",
-  "upstreamVersion": "0.13.0",
+  "upstream": "d91ae138cb931447635e94296023414a58bedcc5",
+  "upstreamVersion": "0.15.3",
   "purpose": "Deliver Hub auto commands with authenticated arrival context and cancellation-safe continuations.",
   "patches": [
     {

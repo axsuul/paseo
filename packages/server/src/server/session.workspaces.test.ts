@@ -2395,6 +2395,7 @@ test("close_items_request archives stored agents that are not currently loaded",
         listAgents: () => [],
         getAgent: (agentId: string) => (agentId === "agent-live" ? { id: agentId } : null),
         hasInFlightRun: () => false,
+        cancelAgentRun: async () => ({ status: "settled" as const }),
         archiveAgent: async (agentId: string) => {
           if (agentId !== "agent-live") {
             throw new Error(`Unexpected live archive: ${agentId}`);
@@ -2559,6 +2560,7 @@ test("close_items_request continues after an archive failure", async () => {
         getAgent: (agentId: string) =>
           agentId === "agent-bad" || agentId === "agent-good" ? { id: agentId } : null,
         hasInFlightRun: () => false,
+        cancelAgentRun: async () => ({ status: "settled" as const }),
         archiveAgent: async (agentId: string) => {
           if (agentId === "agent-bad") {
             throw new Error("archive failed");
