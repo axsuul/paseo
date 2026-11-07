@@ -3,12 +3,15 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import type { WorkspaceDescriptorPayload } from "@getpaseo/protocol/messages";
 
 import { DaemonClient } from "./test-utils/daemon-client.js";
 import { createTestPaseoDaemon, type TestPaseoDaemon } from "./test-utils/paseo-daemon.js";
-import { getWorkspaceGitSelfHealPhaseMs } from "./workspace-git-service.js";
+import {
+  getWorkspaceGitSelfHealPhaseMs,
+  WorkspaceGitServiceImpl,
+} from "./workspace-git-service.js";
 import {
   configureGitProcessPolicy,
   snapshotGitCommandRuntimeMetrics,
@@ -41,6 +44,7 @@ afterEach(async () => {
     process.env.PASEO_GIT_MAX_PROCESSES_PER_SECOND = originalMaxProcessesPerSecond;
   }
   configureGitProcessPolicy(resolveGitProcessPolicy({ env: process.env }));
+  vi.restoreAllMocks();
 });
 
 function git(cwd: string, ...args: string[]): string {
@@ -55,7 +59,10 @@ function git(cwd: string, ...args: string[]): string {
   }).trim();
 }
 
-function seedFixture(siblingCount = SIBLING_COUNT): {
+function seedFixture(
+  siblingCount = SIBLING_COUNT,
+  projectCount = 1,
+): {
   repoRoot: string;
   paseoHomeRoot: string;
   projectId: string;
@@ -94,7 +101,7 @@ function seedFixture(siblingCount = SIBLING_COUNT): {
     siblingWorktrees.push(cwd);
     workspaces.push({
       workspaceId: `ws-sibling-${index}`,
-      projectId,
+      projectId: index % projectCount === 0 ? projectId : `${projectId}-${index % projectCount}`,
       cwd,
       kind: "worktree",
       displayName: branch,
@@ -114,9 +121,9 @@ function seedFixture(siblingCount = SIBLING_COUNT): {
 
   writeFileSync(
     join(projectsDir, "projects.json"),
-    JSON.stringify([
-      {
-        projectId,
+    JSON.stringify(
+      Array.from({ length: projectCount }, (_, index) => ({
+        projectId: index === 0 ? projectId : `${projectId}-${index}`,
         rootPath: repoRoot,
         kind: "git",
         displayName: "repo",
@@ -126,8 +133,8 @@ function seedFixture(siblingCount = SIBLING_COUNT): {
         createdAt: CREATED_AT,
         updatedAt: CREATED_AT,
         archivedAt: null,
-      },
-    ]),
+      })),
+    ),
   );
   writeFileSync(join(projectsDir, "workspaces.json"), JSON.stringify(workspaces));
   return { repoRoot, paseoHomeRoot, projectId, siblingWorktrees };
@@ -657,13 +664,39 @@ test("workspace archive is admitted while 52 sibling observations hydrate", asyn
 test("workspace create is admitted while 100 sibling observations hydrate", async () => {
   process.env.PASEO_GIT_MAX_PROCESSES_PER_SECOND = "64";
   configureGitProcessPolicy({ maxProcessConcurrency: 8, maxProcessesPerSecond: 64 });
-  const fixture = seedFixture();
+  const fixture = seedFixture(SIBLING_COUNT, 3);
+  const checkoutPaths = new Set<string>();
+  let activeCheckoutReads = 0;
+  let peakCheckoutReads = 0;
+  const getCheckout = WorkspaceGitServiceImpl.prototype.getCheckout;
+  const checkoutInspection = vi
+    .spyOn(WorkspaceGitServiceImpl.prototype, "getCheckout")
+    .mockImplementation(async function (cwd) {
+      activeCheckoutReads += 1;
+      peakCheckoutReads = Math.max(peakCheckoutReads, activeCheckoutReads);
+      checkoutPaths.add(cwd);
+      try {
+        return await getCheckout.call(this, cwd);
+      } finally {
+        activeCheckoutReads -= 1;
+      }
+    });
   daemon = await createTestPaseoDaemon({
     paseoHomeRoot: fixture.paseoHomeRoot,
     cleanup: false,
     mcpEnabled: false,
   });
   configureGitProcessPolicy({ maxProcessConcurrency: 8, maxProcessesPerSecond: 64 });
+  // Finish the boot scan before measuring interactive reads, which do not use the scan's limit.
+  await vi.waitFor(
+    () => {
+      expect(checkoutPaths).toEqual(new Set([fixture.repoRoot, ...fixture.siblingWorktrees]));
+      expect(activeCheckoutReads).toBe(0);
+    },
+    { timeout: 30_000 },
+  );
+  expect(peakCheckoutReads).toBeLessThanOrEqual(2);
+  checkoutInspection.mockRestore();
   client = new DaemonClient({
     url: `ws://127.0.0.1:${daemon.port}/ws`,
     appVersion: "0.3.0-beta.2",
@@ -676,9 +709,13 @@ test("workspace create is admitted while 100 sibling observations hydrate", asyn
   });
   expect(snapshot.entries).toHaveLength(SIBLING_COUNT);
   expect(snapshotGitCommandRuntimeMetrics().pending).toBeGreaterThan(0);
+  for (const workspace of snapshot.entries) {
+    expect(workspace.workspaceKind).toBe("worktree");
+    expect(workspace.projectId).toMatch(/^proj-fanout-repro(?:-[12])?$/);
+  }
 
   const createStartedAt = Date.now();
-  const createPromise = client.createWorkspace({
+  const response = await client.createWorkspace({
     source: {
       kind: "worktree",
       cwd: fixture.repoRoot,
@@ -689,7 +726,6 @@ test("workspace create is admitted while 100 sibling observations hydrate", asyn
       worktreeSlug: "created-during-repro",
     },
   });
-  const response = await createPromise;
   expect(response.error).toBeNull();
   expect(response.workspace?.name).toBe("created-during-repro");
   expect(Date.now() - createStartedAt).toBeLessThan(30_000);

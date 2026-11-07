@@ -1,6 +1,7 @@
 import { createWorkspaceRuntimeStore } from "./workspace-runtime-store/index.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import os from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import path, { join } from "node:path";
 import type pino from "pino";
 import type { ForgeService } from "../services/forge-service.js";
@@ -23,6 +24,7 @@ function createLogger() {
   const logger = {
     child: () => logger,
     debug: vi.fn(),
+    info: vi.fn(),
     warn: vi.fn(),
   };
   return logger;
@@ -182,6 +184,38 @@ function createPullRequestStatusResult(
     githubFeaturesEnabled: true,
     ...overrides,
   };
+}
+
+async function settle(assertion: () => void): Promise<void> {
+  const deadline = performance.now() + 5_000;
+  while (true) {
+    try {
+      assertion();
+      return;
+    } catch (failure) {
+      if (performance.now() >= deadline) throw failure;
+    }
+    await delay(1);
+    await vi.advanceTimersByTimeAsync(0);
+  }
+}
+
+async function waitForRefreshesToSettle(service: WorkspaceGitServiceImpl): Promise<void> {
+  await settle(() => {
+    expect(service.getMetrics().workspaceRefreshInFlightCount).toBe(0);
+  });
+}
+
+async function waitForObservationToSettle(
+  service: WorkspaceGitServiceImpl,
+  repositoryWorkspaceLinkCount: number,
+): Promise<void> {
+  await settle(() => {
+    const metrics = service.getMetrics();
+    expect(metrics.repositoryWorkspaceLinkCount).toBe(repositoryWorkspaceLinkCount);
+    expect(metrics.workspaceObservationSetupInFlightCount).toBe(0);
+    expect(metrics.workspaceRefreshInFlightCount).toBe(0);
+  });
 }
 
 async function flushPromises(): Promise<void> {
@@ -1587,6 +1621,7 @@ describe("WorkspaceGitServiceImpl", () => {
       const service = createService({
         subscribe,
         getCheckoutStatus,
+        now: () => new Date(),
         getCheckoutSnapshotFacts: async (cwd) => ({
           ...createCheckoutSnapshotFacts(cwd),
           currentBranch: changed ? "feature" : "main",
@@ -1605,6 +1640,13 @@ describe("WorkspaceGitServiceImpl", () => {
         changed = true;
         await vi.advanceTimersByTimeAsync(1);
         await settle(() => expect(attempts).toBe(2));
+        await vi.waitFor(
+          () =>
+            expect(snapshots.at(-1)?.git).toMatchObject(
+              kind === "repository metadata" ? { currentBranch: "feature" } : { isDirty: true },
+            ),
+          { timeout: 5_000 },
+        );
         await vi.advanceTimersByTimeAsync(1_000);
         await waitForRefreshesToSettle(service);
         expect(snapshots.at(-1)?.git).toMatchObject(
@@ -1684,7 +1726,12 @@ describe("WorkspaceGitServiceImpl", () => {
       signal: null,
     }));
     const getCheckoutStatus = vi.fn(async (cwd: string) => createCheckoutStatus(cwd));
-    const service = createService({ subscribe, runGitCommand, getCheckoutStatus });
+    const service = createService({
+      subscribe,
+      runGitCommand,
+      getCheckoutStatus,
+      now: () => new Date(),
+    });
     const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
     try {
       await settle(() => expect(attempts).toBe(1));
@@ -1694,6 +1741,13 @@ describe("WorkspaceGitServiceImpl", () => {
       ignoredDirectories = ""; // info/exclude changed while metadata observation was unavailable.
       await vi.advanceTimersByTimeAsync(30_000);
       await settle(() => expect(attempts).toBe(2));
+      await vi.waitFor(
+        () =>
+          expect(workingTreeSubscription.updateIgnore).toHaveBeenCalledWith([
+            join(REPO_CWD, ".git"),
+          ]),
+        { timeout: 5_000 },
+      );
       await vi.advanceTimersByTimeAsync(1_000);
       await waitForRefreshesToSettle(service);
       const readsAfterRecovery = getCheckoutStatus.mock.calls.length;

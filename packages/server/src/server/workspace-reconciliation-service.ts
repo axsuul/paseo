@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 import { setImmediate as yieldToLoop } from "node:timers/promises";
 import type { ProjectCheckoutLitePayload } from "@getpaseo/protocol/messages";
 import type pino from "pino";
+import pLimit from "p-limit";
 import type {
   ProjectRegistry,
   WorkspaceRegistry,
@@ -22,6 +23,7 @@ import { deriveProjectKey } from "./project-key.js";
 const DEFAULT_RESCAN_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_DEBOUNCE_MS = 100;
 const INSPECTION_CONCURRENCY = 2;
+const CHECKOUT_INSPECTION_CONCURRENCY = 2;
 const DEFAULT_INSPECTION_TIMEOUT_MS = 5000;
 
 export type ProjectUpdate =
@@ -119,6 +121,8 @@ interface CachedCheckoutRead {
 export type DirectoryState = "directory" | "missing" | "unreadable";
 
 export class WorkspaceReconciliationService {
+  // Share admission across projects so background scans leave the Git queue available to interactive reads.
+  private readonly checkoutInspection = pLimit(CHECKOUT_INSPECTION_CONCURRENCY);
   // Timed-out fs operations retain their slot until the OS returns. Never use
   // the deadline to admit more work into libuv's shared threadpool.
   private readonly timedOutPaths = new Set<string>();
@@ -349,7 +353,7 @@ export class WorkspaceReconciliationService {
     const readCheckout = (cwd: string): Promise<ProjectCheckoutLitePayload> => {
       const existing = checkoutReads.find((read) => areEquivalentPaths(read.cwd, cwd));
       if (existing) return existing.checkout;
-      const checkout = this.readCheckout(cwd);
+      const checkout = this.checkoutInspection(() => this.readCheckout(cwd));
       checkoutReads.push({ cwd, checkout });
       return checkout;
     };
